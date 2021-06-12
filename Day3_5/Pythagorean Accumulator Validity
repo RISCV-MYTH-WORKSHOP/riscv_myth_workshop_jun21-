@@ -13,7 +13,7 @@
    $total_distance[7:0] = 0;
    
    |calc
-      @0
+      @1
          $aa[3:0] = $rand1[3:0];
          $bb[3:0] = $rand2[3:0];
          $valid = $rand3;
