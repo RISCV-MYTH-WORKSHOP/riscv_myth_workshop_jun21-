@@ -34,8 +34,8 @@
    m4_asm(ADD, r10, r14, r0)            // Store final result to register a0 so that it can be read by main program
 
    //Added by me - to check the Ld/Str functionality
-   //m4_asm(SW, r0, r10, 100)
-   //m4_asm(LW, r15, r0, 100)
+   m4_asm(SW, r0, r10, 100)
+   m4_asm(LW, r15, r0, 100)
    // Optional:
    // m4_asm(JAL, r7, 00000000000000000000) // Done. Jump to itself (infinite loop). (Up to 20-bit signed immediate plus implicit 0 bit (unlike JALR) provides byte address; last immediate bit should also be 0)
    m4_define_hier(['M4_IMEM'], M4_NUM_INSTRS)
@@ -44,16 +44,18 @@
       //Type 1 - Using Stalls (NOPS) to ovrcome Hazards
       @0
          $reset = *reset;
-         
+         /*
          $start = $reset ? 0 :
                   >>1$reset ? 1 : 
                   0; //default
-          
+         */
          //Generate a valid signal
+         //Nullify this when including branches, jumps and ld/str
+         /*
          $valid = $reset ? 0 :
                   $start ? 1 :
                   >>3$valid;
-                  
+         */         
       // YOUR CODE HERE         
       //For invalid instructions (-since we won't have a valid instruction every cycle now
       //because of dependency hazards and NOPS
@@ -67,9 +69,9 @@
       //PC logic
          //$pc[31:0] = >>1$reset ? 0 : >>1$pc + 32'd4; // increment by 1 instruction - 4 bytes
          $pc[31:0] = $reset ? 0 : 
-                     >>3$valid_taken_br ? >>3$br_tgt_pc :
-                     >>3$valid_load ? >>3$pc + 32'd4 : 
-                     >>1$pc + 32'd4; //default
+                     >>3$taken_br ? >>3$br_tgt_pc : // changed >>3$valid_taken_br to $taken_vr
+                     >>3$valid_load ? >>3$inc_pc : 
+                     >>1$inc_pc; //default
                      //Inserting NOPS in case of loads 
                     //Giving 3 cycle stall for load  - WHY ? More clarity needed
                      
@@ -80,7 +82,7 @@
         
       @1
          $instr[31:0] = $imem_rd_en ? $imem_rd_data[31:0] : 0;
-         
+         $inc_pc[31:0] = $pc + 32'd4; //define $inc_pc to simplify $pc logic 
          //Decode Logic
          //A. Instruction type
          
@@ -145,7 +147,7 @@
       
          //B.2 Arithmetic 
          $is_addi = $dec_bits ==? 11'bx_000_0010011;
-         $is_add = $dec_bits == 11'b0_000_0110011;
+         $is_add = $dec_bits ==? 11'b0_000_0110011;
          $is_sub = $dec_bits ==? 11'b1_000_0110011;
          
          //B.3 Logical
@@ -231,8 +233,8 @@
                          $is_sltiu ? $sltiu_rslt :
                          $is_lui ? {$imm[31:12], 12'd0} :
                          $is_auipc ? $pc + $imm :
-                         $is_jal ? $pc + 4'd4 :
-                         $is_jalr ? $pc + 4'd4 :
+                         $is_jal ? $pc + 32'd4 :
+                         $is_jalr ? $pc + 32'd4 :
                          $is_sra ? { {32{$src1_value[31]}}, $src1_value} >> $src2_value[4:0] :
                          $is_srai ? { {32{$src1_value[31]}}, $src1_value} >> $imm[4:0] :
                          $is_slt ? ($src1_value[31] == $src2_value[31]) ? $sltu_rslt : {31'b0, $src1_value[31]} :
@@ -241,7 +243,12 @@
                          ($is_load || $is_store) ? $src1_value + $imm : //this is same as addi and calculates the address of the load/store
                          32'bx; // default
                          
-         //Branch control                
+         //Change $valid logic to incorporate branches, loads and jumps
+         //Nullify previously created $valid
+         $valid = $reset ? 0 :
+                  !(>>1$valid_taken_br || >>2$valid_taken_br || >>1$valid_load || >>2$valid_load) ? 1 :
+                  0;
+         //Branch control 
          $taken_br = $is_beq ? $beq :
                      $is_bne ? $bne :
                      $is_bltu ? $bltu :
@@ -313,7 +320,7 @@
    //TB to check pass/fail by monitoring value in x10(r10) at the end of simulation
    // Assert these to end simulation (before Makerchip cycle limit).
    //*passed = *cyc_cnt > 40;
-   *passed = |cpu/xreg[10]>>5$value == (1+2+3+4+5+6+7+8+9);
+   *passed = |cpu/xreg[15]>>5$value == (1+2+3+4+5+6+7+8+9);
    *failed = 1'b0;
    
    // Macro instantiations for:
