@@ -68,9 +68,11 @@
       // ...
       //PC logic
          //$pc[31:0] = >>1$reset ? 0 : >>1$pc + 32'd4; // increment by 1 instruction - 4 bytes
-         $pc[31:0] = $reset ? 0 : 
+         $pc[31:0] = >>1$reset ? 0 : 
                      >>3$taken_br ? >>3$br_tgt_pc : // changed >>3$valid_taken_br to $taken_vr
                      >>3$valid_load ? >>3$inc_pc : 
+                     (>>3$is_jal && >>3$valid_jump) ? >>3$br_tgt_pc :
+                     (>>3$is_jalr && >>3$valid_jump) ? >>3$jalr_tgt_pc :
                      >>1$inc_pc; //default
                      //Inserting NOPS in case of loads 
                     //Giving 3 cycle stall for load  - WHY ? More clarity needed
@@ -90,7 +92,7 @@
          $is_u_instr = $instr[6:2] ==? 5'b0x101;
          $is_j_instr = $instr[6:2] ==? 5'b11011;
          $is_r_instr = $instr[6:2] ==? 5'b01011 ||
-                       $instr[6:2] ==? 5'b011x0 ||
+                       $instr[6:2] ==? 5'b0110x ||
                        $instr[6:2] ==? 5'b10100;
          $is_i_instr = $instr[6:2] ==? 5'b0000x ||
                        $instr[6:2] ==? 5'b001x0 ||
@@ -147,7 +149,7 @@
       
          //B.2 Arithmetic 
          $is_addi = $dec_bits ==? 11'bx_000_0010011;
-         $is_add = $dec_bits ==? 11'b0_000_0110011;
+         $is_add = $dec_bits == 11'b0_000_0110011;
          $is_sub = $dec_bits ==? 11'b1_000_0110011;
          
          //B.3 Logical
@@ -177,37 +179,47 @@
          
       @2
          //RF Read 
-         $rf_rd_en1 = $reset ? 0 :
-                      $rs1_valid ? 1 :
-                      0; //default
-         $rf_rd_en2 = $reset ? 0:
-                      $rs2_valid ? 1:
-                      0; //default
+         $rf_rd_en1 = $rs1_valid;
+         $rf_rd_en2 = $rs2_valid;
+                      
                       
          $rf_rd_index1[4:0] = $rf_rd_en1 ? $rs1 : 0;
          $rf_rd_index2[4:0] = $rf_rd_en2 ? $rs2 : 0;
          
          //Rd read outputs
+         /*
          $src1_value[31:0] = $rf_rd_en1 ? 
                              (>>1$rf_wr_en && (>>1$rd == $rs1)) ? >>1$result : 
                                                                 $rf_rd_data1[31:0] : 
                              0; //default
+         */
+         $src1_value[31:0] = (>>1$rf_wr_en && (>>1$rd == $rs1)) ? >>1$result : 
+                                                                $rf_rd_data1[31:0]; //modified
                              
-         $src2_value[31:0] = $rf_rd_en2 ? 
-                             (>>1$rf_wr_en && (>>1$rd == $rs2)) ? >>1$result : 
-                                                                  $rf_rd_data2[31:0] : 
-                             0;
+         $src2_value[31:0] = (>>1$rf_wr_en && (>>1$rd == $rs2)) ? >>1$result : 
+                                                                  $rf_rd_data2[31:0];
          
          
          //BRANCHES
+         /*
          $beq = ($rf_rd_data1 == $rf_rd_data2);
          $bne = ($rf_rd_data1 != $rf_rd_data2);
          $bltu = ($rf_rd_data1 < $rf_rd_data2);
          $bgeu = ($rf_rd_data1 >= $rf_rd_data2);
          $blt = ($rf_rd_data1[31] != $rf_rd_data2[31]) ^ ($rf_rd_data1 < $rf_rd_data2);
          $bge = ($rf_rd_data1[31] != $rf_rd_data2[31]) ^ ($rf_rd_data1 >= $rf_rd_data2);
-      
+         */
+         
+         //Branch logic // change from $rf_rd_data1/2 to $src1/2_value
+         $beq = ($src1_value == $src2_value);
+         $bne = ($src1_value != $src2_value);
+         $bltu = ($src1_value < $src2_value);
+         $bgeu = ($src1_value >= $src2_value);
+         $blt = ($src1_value[31] != $src2_value[31]) ^ ($src1_value < $src2_value);
+         $bge = ($src1_value[31] != $src2_value[31]) ^ ($src1_value >= $src2_value);
+         
          $br_tgt_pc[31:0] = $pc + $imm; 
+         
          
       @3
          //ALU and output selection
@@ -241,13 +253,12 @@
                          $is_slti ? ($src1_value[31] == $imm[31]) ? $sltiu_rslt : {31'b0, $src1_value[31]} :
                          //For loads and stores, compute the result(address)
                          ($is_load || $is_store) ? $src1_value + $imm : //this is same as addi and calculates the address of the load/store
-                         32'bx; // default
+                         32'b0; // default
                          
          //Change $valid logic to incorporate branches, loads and jumps
          //Nullify previously created $valid
-         $valid = $reset ? 0 :
-                  !(>>1$valid_taken_br || >>2$valid_taken_br || >>1$valid_load || >>2$valid_load) ? 1 :
-                  0;
+         $valid = !(>>1$valid_taken_br || >>2$valid_taken_br || >>1$valid_load || >>2$valid_load);
+         
          //Branch control 
          $taken_br = $is_beq ? $beq :
                      $is_bne ? $bne :
@@ -259,14 +270,16 @@
          
          $valid_taken_br = $taken_br && $valid; //added valid for NOPs
          
+         //JALR PC calc - based on obtained $src1_value
+         $jalr_tgt_pc[31:0] = $src1_value + $imm;
          //Check the flow of code - it seems sequential; could lead to potential problems           
          //Rf write
          // Dealing with RAW dependence through Forwarding
          //$rd_valid = $rd == 5'd0 ? 0 : 1;
-         $rf_wr_en = $reset ? 0 : 
-                     ($rd_valid && $rd != 5'd0 && $valid) || >>2$valid_load ? 1: //$valid added for NOPS
-                     0; //default
-         $rf_wr_index[4:0] = $rf_wr_en ? >>2$valid_load ? >>2$rd : $rd : 0;
+         $rf_wr_en = (($rd_valid && $rd != 5'd0 && $valid) || >>2$valid_load); //$valid added for NOPS
+                     
+         //$rf_wr_index[4:0] = $rf_wr_en ? >>2$valid_load ? >>2$rd : $rd : 0; // previous incorrect logic
+         $rf_wr_index[4:0] = $rf_wr_en ? !$valid ? >>2$rd : $rd : 0; // modified correct logic
          //modified to accomodate load instruction - defined the load address from when load instr occured (2 cycles earlier)
                   
          //$rf_wr_data[31:0] = $rf_wr_en ? >>2$result : 0; //my logic
@@ -274,28 +287,31 @@
          //New logic to accmodate load/store
          // Perform write of ld_data into RF after waiting for cycles after we go to mem to fetch ld_data
          // to wait for the ld_data to be returned from data cache 
-         $rf_wr_data[31:0] = $rf_wr_en ? $valid_load ? >>2$ld_data[31:0] : $result : 0;
+         $rf_wr_data[31:0] = $rf_wr_en ? !$valid ? >>2$ld_data[31:0] : $result : 0;
          
          
          //Load control 
          $valid_load = $valid && $is_load;
-         $valid_store = $valid && $is_store;
+         //$valid_store = $valid && $is_store; 
+         $valid_store = $valid && $is_s_instr;
+         
+         $valid_jump = $valid && ($is_jal || $is_jalr);
       @4
          //Load/Store data memory interface connections //Come back again to gain clairy
          //Dmem is only either 1R or 1W per cycle
          //Read
-         $dmem_rd_en = $reset ? 0 :
-                       $valid_load ? 1 :
-                       0;//default
+         $dmem_rd_en = $valid_load;
                        
-         $dmem_addr[3:0] = $valid_load ? $result[5:2] : 0; //The output of result[31:0] on a valid_load
+                       
+         //$dmem_addr[3:0] = $valid_load ? $result[5:2] : 0; //The output of result[31:0] on a valid_load
                                                            //generates the address of the data memory to be read
-         //Write                                                  // In this case, only the lower 4 bits are needed, since the memory has only 16 entries
-         $dmem_wr_en = $reset ? 0 :
-                       $valid_store ? 1:
-                       0;//default
-         
-         $dmem_wr_data[31:0] = $src2_value; //Store gets value from second operand
+                                                   // In this case, only the lower 4 bits are needed, since the memory has only 16 entries
+         $dmem_addr[3:0] = $result[5:2]; // modified
+         //Write 
+         //$dmem_wr_en = $valid_store; 
+         $dmem_wr_en = $valid && $is_s_instr; // modified
+                      
+         $dmem_wr_data[31:0] = $src2_value[31:0]; //Store gets value from second operand
                        
           
       @5
