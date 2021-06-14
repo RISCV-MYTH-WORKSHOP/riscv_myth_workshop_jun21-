@@ -38,21 +38,39 @@
    m4_define_hier(['M4_IMEM'], M4_NUM_INSTRS)
 
    |cpu
+      //Type 1 - Using Stalls (NOPS) to ovrcome Hazards
       @0
          $reset = *reset;
-         //$imem_rd_data[31:0] = 0;
-
-
-      // YOUR CODE HERE
+         
+         $start = $reset ? 0 :
+                  >>1$reset ? 1 : 
+                  0; //default
+          
+         //Generate a valid signal
+         $valid = $reset ? 0 :
+                  $start ? 1 :
+                  >>3$valid;
+                  
+      // YOUR CODE HERE         
+      //For invalid instructions (-since we won't have a valid instruction every cycle now
+      //because of dependency hazards and NOPS
+      // Use the generated $valid signal to : - 
+      // a. PC should not change during a NOP
+      // b. Reg Write into RF should not occur during NOP
+      // c. Update inter-instructiob dependency aligments by waiting for 3 cycles before starting new instruction
+         
+  
       // ...
       //PC logic
-         $pc[31:0] = >>1$reset ? 0 : >>1$pc + 32'd4; // increment by 1 instruction - 4 bytes
-         
+         //$pc[31:0] = >>1$reset ? 0 : >>1$pc + 32'd4; // increment by 1 instruction - 4 bytes
+         $pc[31:0] = $reset ? 0 : 
+                     >>3$valid_taken_br ? >>3$br_tgt_pc :
+                     >>3$pc + 32'd4;
          //Fetch logic // instruction memory is present
          
-         $imem_rd_en = $reset ? 0: 1;
-         $imem_rd_addr[M4_IMEM_INDEX_CNT-1:0] = $pc[M4_IMEM_INDEX_CNT+1:2];
-         
+         $imem_rd_en = $reset ? 0 : 1;
+         $imem_rd_addr[M4_IMEM_INDEX_CNT-1:0] = $pc[M4_IMEM_INDEX_CNT+1:2]; 
+        
       @1
          $instr[31:0] = $imem_rd_en ? $imem_rd_data[31:0] : 0;
          
@@ -67,8 +85,8 @@
                        $instr[6:2] ==? 5'b10100;
          $is_i_instr = $instr[6:2] ==? 5'b0000x ||
                        $instr[6:2] ==? 5'b001x0 ||
-                       $instr[6:2] ==? 5'b11001 ||
-                       $instr[6:2] ==? 5'b11100;
+                       $instr[6:2] ==? 5'b11001;
+                       //$instr[6:2] ==? 5'b11100;
          $is_s_instr = $instr[6:2] ==? 5'b0100x;
          
          //B. Immediate decode
@@ -103,7 +121,7 @@
          //E. Decode Individual instructions
          // Only a subset of RISCV spec - just what we need
          //A. Collect bits that are needed to specify an instruction
-         $dec_bits[10:0] = {$funct[7], $funct3, $opcode};
+         $dec_bits[10:0] = {$funct7[5], $funct3, $opcode};
          //B. Now decode the istructions by matching patterns in Spec with $dec_bits
          //B.1 branch instructions
          $is_beq = $dec_bits ==? 11'bx_000_1100011;
@@ -117,13 +135,74 @@
          $is_addi = $dec_bits ==? 11'bx_000_0010011;
          $is_add = $dec_bits == 11'b0_000_0110011;
          
+      @2
+         //RF Read 
+         $rf_rd_en1 = $reset ? 0 :
+                      $rs1_valid ? 1 :
+                      0; //default
+         $rf_rd_en2 = $reset ? 0:
+                      $rs2_valid ? 1:
+                      0; //default
+                      
+         $rf_rd_index1[4:0] = $rs1_valid ? $rs1 : 0;
+         $rf_rd_index2[4:0] = $rs2_valid ? $rs2 : 0;
+         
+         //Rd read outputs
+         $src1_value[31:0] = $rf_rd_en1 ? $rf_rd_data1[31:0] : 0; 
+         $src2_value[31:0] = $rf_rd_en2 ? $rf_rd_data2[31:0] : 0;
          
          
+         //BRANCHES
+         $beq = ($rf_rd_data1 == $rf_rd_data2);
+         $bne = ($rf_rd_data1 != $rf_rd_data2);
+         $bltu = ($rf_rd_data1 < $rf_rd_data2);
+         $bgeu = ($rf_rd_data1 >= $rf_rd_data2);
+         $blt = ($rf_rd_data1[31] != $rf_rd_data2[31]) ^ ($rf_rd_data1 < $rf_rd_data2);
+         $bge = ($rf_rd_data1[31] != $rf_rd_data2[31]) ^ ($rf_rd_data1 >= $rf_rd_data2);
+      
+         $br_tgt_pc[31:0] = $pc + $imm; 
+         
+      @3
+         //ALU and output selection
+         $result[31:0] = $is_addi ? $src1_value + $imm :
+                         $is_add ? $src1_value + $src2_value :
+                         0; // default
+                         
+         //Branch control                
+         $taken_br = $is_beq ? $beq :
+                     $is_bne ? $bne :
+                     $is_bltu ? $bltu :
+                     $is_bgeu ? $bgeu :
+                     $is_blt ? $blt :
+                     $is_bge ? $bge :
+                     1'b0; //default
+         
+         $valid_taken_br = $taken_br && $valid; //added valid for NOPs
+         //Calculate new $pc 
+         //a. all instructions delayed by 3 cycles
+         //b. $pc depends on valid_taken_branch
+         /*
+         $pc[31:0] = $reset ? 0 : 
+                     >>3$valid_taken_br ? >>3$br_tgt_pc :
+                     >>3$pc + 32'd4;
+         */
+         //Check the flow of code - it seems sequrntial; could lead to potential problems           
+         //$imem_rd_addr[M4_IMEM_INDEX_CNT-1:0] = $pc[M4_IMEM_INDEX_CNT+1:2];
+         
+         //Rf write
+         //$rd_valid = $rd == 5'd0 ? 0 : 1;
+         $rf_wr_en = $reset ? 0 : 
+                     $rd_valid && $rd != 5'd0 && $valid ? 1: //$valid added for NOPS
+                     0; //default
+         $rf_wr_index[4:0] = $rd_valid ? $rd : 0;
+
+      
+         $rf_wr_data[31:0] = $rf_wr_en ? $result : 0;
          
       // Note: Because of the magic we are using for visualisation, if visualisation is enabled below,
       //       be sure to avoid having unassigned signals (which you might be using for random inputs)
       //       other than those specifically expected in the labs. You'll get strange errors for these.
-
+      
    //BOGUS USE to suppress warnings
    /*
    `BOGUS_USE($rd $rd_valid $rs1 $rs1_valid $rs2 $rs2_valid $instr $is_r_instr
@@ -133,9 +212,12 @@
               $src1_value $src2_value $result
               $beq $bne $blt $bge $bltu $bgeu
               $taken_br $br_tgt_pc);
-   */         
+   */   
+   
+   //TB to check pass/fail by monitoring value in x10(r10) at the end of simulation
    // Assert these to end simulation (before Makerchip cycle limit).
    *passed = *cyc_cnt > 40;
+   //*passed = |cpu/xreg[10]>>5$value == (1+2+3+4+5+6+7+8+9);
    *failed = 1'b0;
    
    // Macro instantiations for:
@@ -146,7 +228,7 @@
    |cpu
       m4+imem(@1)    // Args: (read stage) //Instruction mem in @1
       
-      //m4+rf(@1, @1)  // Args: (read stage, write stage) - if equal, no register bypass is required
+      m4+rf(@2, @3)  // Args: (read stage, write stage) - if equal, no register bypass is required
       //m4+dmem(@4)    // Args: (read/write stage)
    
    m4+cpu_viz(@4)    // For visualisation, argument should be at least equal to the last stage of CPU logic. @4 would work for all labs.
