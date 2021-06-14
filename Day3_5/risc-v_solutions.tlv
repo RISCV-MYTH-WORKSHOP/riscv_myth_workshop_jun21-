@@ -32,7 +32,10 @@
    m4_asm(ADDI, r13, r13, 1)            // Increment intermediate register by 1
    m4_asm(BLT, r13, r12, 1111111111000) // If a3 is less than a2, branch to label named <loop>
    m4_asm(ADD, r10, r14, r0)            // Store final result to register a0 so that it can be read by main program
-   
+
+   //Added by me - to check the Ld/Str functionality
+   //m4_asm(SW, r0, r10, 100)
+   //m4_asm(LW, r15, r0, 100)
    // Optional:
    // m4_asm(JAL, r7, 00000000000000000000) // Done. Jump to itself (infinite loop). (Up to 20-bit signed immediate plus implicit 0 bit (unlike JALR) provides byte address; last immediate bit should also be 0)
    m4_define_hier(['M4_IMEM'], M4_NUM_INSTRS)
@@ -65,7 +68,11 @@
          //$pc[31:0] = >>1$reset ? 0 : >>1$pc + 32'd4; // increment by 1 instruction - 4 bytes
          $pc[31:0] = $reset ? 0 : 
                      >>3$valid_taken_br ? >>3$br_tgt_pc :
-                     >>3$pc + 32'd4;
+                     >>3$valid_load ? >>3$pc + 32'd4 : 
+                     >>1$pc + 32'd4; //default
+                     //Inserting NOPS in case of loads 
+                    //Giving 3 cycle stall for load  - WHY ? More clarity needed
+                     
          //Fetch logic // instruction memory is present
          
          $imem_rd_en = $reset ? 0 : 1;
@@ -164,10 +171,7 @@
          //B.4 Loads and Stores
          $is_lui = $dec_bits ==? 11'bx_xxx_0110111;
          $is_load = $dec_bits ==? 11'bx_xxx_0000011; // Concatenate all loads into 1 instruction for our purposes
-         
-         $is_sb = $dec_bits ==? 11'bx_000_0100011;
-         $is_sh = $dec_bits ==? 11'bx_001_0100011;
-         $is_sw = $dec_bits ==? 11'bx_010_0100011;
+         $is_store = $dec_bits ==? 11'bx_xxx_0100011; // Concatenate all stores into 1 instruction for our purposes
          
       @2
          //RF Read 
@@ -178,18 +182,18 @@
                       $rs2_valid ? 1:
                       0; //default
                       
-         $rf_rd_index1[4:0] = $rs1_valid ? $rs1 : 0;
-         $rf_rd_index2[4:0] = $rs2_valid ? $rs2 : 0;
+         $rf_rd_index1[4:0] = $rf_rd_en1 ? $rs1 : 0;
+         $rf_rd_index2[4:0] = $rf_rd_en2 ? $rs2 : 0;
          
          //Rd read outputs
          $src1_value[31:0] = $rf_rd_en1 ? 
-                             >>1$rf_wr_en && (>>1$rd == >>1$rs1) ? >>1$result : 
-                                                          $rf_rd_data1[31:0] : 
+                             (>>1$rf_wr_en && (>>1$rd == $rs1)) ? >>1$result : 
+                                                                $rf_rd_data1[31:0] : 
                              0; //default
                              
          $src2_value[31:0] = $rf_rd_en2 ? 
-                             >>1$rf_wr_en && (>>1$rd == >>1$rs2) ? >>1$result : 
-                                                            $rf_rd_data2[31:0] : 
+                             (>>1$rf_wr_en && (>>1$rd == $rs2)) ? >>1$result : 
+                                                                  $rf_rd_data2[31:0] : 
                              0;
          
          
@@ -233,7 +237,9 @@
                          $is_srai ? { {32{$src1_value[31]}}, $src1_value} >> $imm[4:0] :
                          $is_slt ? ($src1_value[31] == $src2_value[31]) ? $sltu_rslt : {31'b0, $src1_value[31]} :
                          $is_slti ? ($src1_value[31] == $imm[31]) ? $sltiu_rslt : {31'b0, $src1_value[31]} :
-                         0; // default
+                         //For loads and stores, compute the result(address)
+                         ($is_load || $is_store) ? $src1_value + $imm : //this is same as addi and calculates the address of the load/store
+                         32'bx; // default
                          
          //Branch control                
          $taken_br = $is_beq ? $beq :
@@ -245,27 +251,49 @@
                      1'b0; //default
          
          $valid_taken_br = $taken_br && $valid; //added valid for NOPs
-         //Calculate new $pc 
-         //a. all instructions delayed by 3 cycles
-         //b. $pc depends on valid_taken_branch
-         /*
-         $pc[31:0] = $reset ? 0 : 
-                     >>3$valid_taken_br ? >>3$br_tgt_pc :
-                     >>3$pc + 32'd4;
-         */
-         //Check the flow of code - it seems sequrntial; could lead to potential problems           
-         //$imem_rd_addr[M4_IMEM_INDEX_CNT-1:0] = $pc[M4_IMEM_INDEX_CNT+1:2];
          
+         //Check the flow of code - it seems sequential; could lead to potential problems           
          //Rf write
          // Dealing with RAW dependence through Forwarding
          //$rd_valid = $rd == 5'd0 ? 0 : 1;
          $rf_wr_en = $reset ? 0 : 
-                     $rd_valid && $rd != 5'd0 && $valid ? 1: //$valid added for NOPS
+                     ($rd_valid && $rd != 5'd0 && $valid) || >>2$valid_load ? 1: //$valid added for NOPS
                      0; //default
-         $rf_wr_index[4:0] = $rd_valid ? $rd : 0;
-
-      
-         $rf_wr_data[31:0] = $rf_wr_en ? >>2$result : 0;
+         $rf_wr_index[4:0] = $rf_wr_en ? >>2$valid_load ? >>2$rd : $rd : 0;
+         //modified to accomodate load instruction - defined the load address from when load instr occured (2 cycles earlier)
+                  
+         //$rf_wr_data[31:0] = $rf_wr_en ? >>2$result : 0; //my logic
+         //$rf_wr_data[31:0] = $rf_wr_en ? $result : 0; //modified logic - this is correct if NO ld/str
+         //New logic to accmodate load/store
+         // Perform write of ld_data into RF after waiting for cycles after we go to mem to fetch ld_data
+         // to wait for the ld_data to be returned from data cache 
+         $rf_wr_data[31:0] = $rf_wr_en ? $valid_load ? >>2$ld_data[31:0] : $result : 0;
+         
+         
+         //Load control 
+         $valid_load = $valid && $is_load;
+         $valid_store = $valid && $is_store;
+      @4
+         //Load/Store data memory interface connections //Come back again to gain clairy
+         //Dmem is only either 1R or 1W per cycle
+         //Read
+         $dmem_rd_en = $reset ? 0 :
+                       $valid_load ? 1 :
+                       0;//default
+                       
+         $dmem_addr[3:0] = $valid_load ? $result[5:2] : 0; //The output of result[31:0] on a valid_load
+                                                           //generates the address of the data memory to be read
+         //Write                                                  // In this case, only the lower 4 bits are needed, since the memory has only 16 entries
+         $dmem_wr_en = $reset ? 0 :
+                       $valid_store ? 1:
+                       0;//default
+         
+         $dmem_wr_data[31:0] = $src2_value; //Store gets value from second operand
+                       
+          
+      @5
+         $ld_data[31:0] = $dmem_rd_data; 
+        
          
       // Note: Because of the magic we are using for visualisation, if visualisation is enabled below,
       //       be sure to avoid having unassigned signals (which you might be using for random inputs)
@@ -284,8 +312,8 @@
    
    //TB to check pass/fail by monitoring value in x10(r10) at the end of simulation
    // Assert these to end simulation (before Makerchip cycle limit).
-   *passed = *cyc_cnt > 40;
-   //*passed = |cpu/xreg[10]>>5$value == (1+2+3+4+5+6+7+8+9);
+   //*passed = *cyc_cnt > 40;
+   *passed = |cpu/xreg[10]>>5$value == (1+2+3+4+5+6+7+8+9);
    *failed = 1'b0;
    
    // Macro instantiations for:
@@ -297,7 +325,7 @@
       m4+imem(@1)    // Args: (read stage) //Instruction mem in @1
       
       m4+rf(@2, @3)  // Args: (read stage, write stage) - if equal, no register bypass is required
-      //m4+dmem(@4)    // Args: (read/write stage)
+      m4+dmem(@4)    // Args: (read/write stage)
    
    m4+cpu_viz(@4)    // For visualisation, argument should be at least equal to the last stage of CPU logic. @4 would work for all labs.
 \SV
