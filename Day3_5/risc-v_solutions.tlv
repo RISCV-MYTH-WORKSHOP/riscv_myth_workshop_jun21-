@@ -131,9 +131,43 @@
          $is_bltu = $dec_bits ==? 11'bx_110_1100011;
          $is_bgeu = $dec_bits ==? 11'bx_111_1100011;
          
+         $is_jal = $dec_bits ==? 11'bx_xxx_1101111;
+         $is_jalr = $dec_bits ==? 11'bx_000_1100111;
+         
+         $is_auipc = $dec_bits ==? 11'bx_xxx_0010111;
+      
          //B.2 Arithmetic 
          $is_addi = $dec_bits ==? 11'bx_000_0010011;
          $is_add = $dec_bits == 11'b0_000_0110011;
+         $is_sub = $dec_bits ==? 11'b1_000_0110011;
+         
+         //B.3 Logical
+         $is_slti = $dec_bits ==? 11'bx_010_0010011;
+         $is_xori = $dec_bits ==? 11'bx_100_0010011;
+         $is_andi = $dec_bits ==? 11'bx_111_0010011;
+         $is_slli = $dec_bits ==? 11'b0_001_0010011;
+         $is_srli = $dec_bits ==? 11'b0_101_0010011;
+         $is_srai = $dec_bits ==? 11'b1_101_0010011;
+         $is_ori  = $dec_bits ==? 11'bx_110_0010011; 
+         
+         $is_sll = $dec_bits ==? 11'b0_001_0110011;
+         $is_slt = $dec_bits ==? 11'b0_010_0110011;
+         $is_xor = $dec_bits ==? 11'b0_100_0110011;
+         $is_srl = $dec_bits ==? 11'b0_101_0110011;
+         $is_sra = $dec_bits ==? 11'b1_101_0110011;
+         $is_and = $dec_bits ==? 11'b0_111_0110011;
+         $is_or  = $dec_bits ==? 11'b0_110_0110011;
+         
+         $is_sltiu = $dec_bits ==? 11'bx_011_0010011;
+         $is_sltu  = $dec_bits ==? 11'b0_011_0110011;
+         
+         //B.4 Loads and Stores
+         $is_lui = $dec_bits ==? 11'bx_xxx_0110111;
+         $is_load = $dec_bits ==? 11'bx_xxx_0000011; // Concatenate all loads into 1 instruction for our purposes
+         
+         $is_sb = $dec_bits ==? 11'bx_000_0100011;
+         $is_sh = $dec_bits ==? 11'bx_001_0100011;
+         $is_sw = $dec_bits ==? 11'bx_010_0100011;
          
       @2
          //RF Read 
@@ -148,8 +182,15 @@
          $rf_rd_index2[4:0] = $rs2_valid ? $rs2 : 0;
          
          //Rd read outputs
-         $src1_value[31:0] = $rf_rd_en1 ? $rf_rd_data1[31:0] : 0; 
-         $src2_value[31:0] = $rf_rd_en2 ? $rf_rd_data2[31:0] : 0;
+         $src1_value[31:0] = $rf_rd_en1 ? 
+                             >>1$rf_wr_en && (>>1$rd == >>1$rs1) ? >>1$result : 
+                                                          $rf_rd_data1[31:0] : 
+                             0; //default
+                             
+         $src2_value[31:0] = $rf_rd_en2 ? 
+                             >>1$rf_wr_en && (>>1$rd == >>1$rs2) ? >>1$result : 
+                                                            $rf_rd_data2[31:0] : 
+                             0;
          
          
          //BRANCHES
@@ -164,8 +205,34 @@
          
       @3
          //ALU and output selection
+         //first code partial results for sltu and sltiu instrs
+         $sltu_rslt[31:0]  = $is_sltu  ? ($src1_value < $src2_value) : 0;
+         $sltiu_rslt[31:0] = $is_sltiu ? ($src1_value < $imm) : 0; 
+         
+         //now code the final results based on intructions type (notice the diff for slt & slti)
          $result[31:0] = $is_addi ? $src1_value + $imm :
-                         $is_add ? $src1_value + $src2_value :
+                         $is_add  ? $src1_value + $src2_value :
+                         $is_andi ? $src1_value & $imm :
+                         $is_ori  ? $src1_value | $imm :
+                         $is_xori ? $src1_value ^ $imm :
+                         $is_slli ? $src1_value << $imm[5:0] :
+                         $is_srli ? $src1_value >> $imm[5:0] :
+                         $is_and  ? $src1_value & $src2_value :
+                         $is_or   ? $src1_value | $src2_value :
+                         $is_xor  ? $src1_value ^ $src2_value :
+                         $is_sub  ? $src1_value - $src2_value :
+                         $is_sll  ? $src1_value << $src2_value[4:0] :
+                         $is_srl  ? $src1_value >> $src2_value[4:0] : 
+                         $is_sltu ? $sltu_rslt :
+                         $is_sltiu ? $sltiu_rslt :
+                         $is_lui ? {$imm[31:12], 12'd0} :
+                         $is_auipc ? $pc + $imm :
+                         $is_jal ? $pc + 4'd4 :
+                         $is_jalr ? $pc + 4'd4 :
+                         $is_sra ? { {32{$src1_value[31]}}, $src1_value} >> $src2_value[4:0] :
+                         $is_srai ? { {32{$src1_value[31]}}, $src1_value} >> $imm[4:0] :
+                         $is_slt ? ($src1_value[31] == $src2_value[31]) ? $sltu_rslt : {31'b0, $src1_value[31]} :
+                         $is_slti ? ($src1_value[31] == $imm[31]) ? $sltiu_rslt : {31'b0, $src1_value[31]} :
                          0; // default
                          
          //Branch control                
@@ -190,6 +257,7 @@
          //$imem_rd_addr[M4_IMEM_INDEX_CNT-1:0] = $pc[M4_IMEM_INDEX_CNT+1:2];
          
          //Rf write
+         // Dealing with RAW dependence through Forwarding
          //$rd_valid = $rd == 5'd0 ? 0 : 1;
          $rf_wr_en = $reset ? 0 : 
                      $rd_valid && $rd != 5'd0 && $valid ? 1: //$valid added for NOPS
@@ -197,7 +265,7 @@
          $rf_wr_index[4:0] = $rd_valid ? $rd : 0;
 
       
-         $rf_wr_data[31:0] = $rf_wr_en ? $result : 0;
+         $rf_wr_data[31:0] = $rf_wr_en ? >>2$result : 0;
          
       // Note: Because of the magic we are using for visualisation, if visualisation is enabled below,
       //       be sure to avoid having unassigned signals (which you might be using for random inputs)
